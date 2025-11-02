@@ -1,0 +1,9 @@
+{
+    "platform_url": "http://localhost:9999/admin/",
+    "config_file": "/Users/zhangjiang/PyCharmMiscProject/mmenginetest/config.json",
+    "train_module_path": "./",
+    "train_script": "train",
+    "port": 8001,
+    "description": "this is a test",
+    "register_max_retries": 100
+}

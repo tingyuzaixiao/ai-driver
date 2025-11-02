@@ -17,16 +17,13 @@ class AiServer:
     HEARTBEAT_API = API_PATH + "/heartbeat"
     DOWNLOAD_DATASET_API = API_PATH + "/file"
 
-    DATASET_BUCKET = "dataset"
     FILE_CHUNK_SIZE = 1024 * 1024
 
-    def __init__(self, platform_url: str, base_dir: str):
-        logger.info("platform_url: %s, base_dir: %s", platform_url, base_dir)
+    def __init__(self, platform_url: str):
+        logger.info("platform_url: %s", platform_url)
         AiServer._check_str_param(platform_url)
-        AiServer._check_str_param(base_dir)
 
         self._platformUrl = platform_url
-        self._baseDir = base_dir
 
     @staticmethod
     def _check_str_param(param: str):
@@ -47,21 +44,16 @@ class AiServer:
         AiServer._check_str_param(value)
         self._platformUrl = value
 
-    @property
-    def base_dir(self):
-        return self._baseDir
-
-    @base_dir.setter
-    def base_dir(self, value: str):
-        AiServer._check_str_param(value)
-        self._baseDir = value
-
     @staticmethod
     def _send_request(url: str,
-                      response_handler: Callable[[Optional[httpx.Response], Optional[dict]],
-                          bool | str | None],
-                      method: str = "POST", params: dict = None,
-                      json_data: dict = None, headers: dict = None, timeout: float = 5.0) -> bool:
+                      response_handler: Callable[[Optional[httpx.Response], Optional[dict],
+                                                  Optional[dict]], bool | str | None],
+                      method: str = "POST",
+                      params: dict = None,
+                      json_data: dict = None,
+                      headers: dict = None,
+                      extra: dict = None,
+                      timeout: float = 5.0) -> bool:
         if headers is None:
             headers = {"Content-Type": "application/json; charset=UTF-8"}
         headers["from"] = "Y"
@@ -91,8 +83,9 @@ class AiServer:
             return False
 
     @staticmethod
-    def _handle_http_ok_response(response: Union[httpx.Response, None],
-                                 payload: Union[dict, None]) -> bool:
+    def _handle_http_ok_response(response: Optional[httpx.Response],
+                                 payload: Optional[dict],
+                                 extra: Optional[dict]) -> bool:
         if response is None:
             logger.error("response is None")
             return False
@@ -106,7 +99,7 @@ class AiServer:
                           response_data.get('code'), response_data.get('msg'))
             return False
 
-    def get_register_url(self):
+    def _get_register_url(self):
         return urljoin(self._platformUrl, AiServer.REGISTER_API)
 
     def _register(self, port: int, description: str, params: str):
@@ -122,37 +115,35 @@ class AiServer:
         headers = {"Content-Type": "application/json; charset=UTF-8"}
 
         return AiServer._send_request(
-            url=self.get_register_url(),
+            url=self._get_register_url(),
             response_handler=AiServer._handle_http_ok_response,
             method="POST",
             json_data=payload,
             headers=headers,
             timeout=5.0)
 
-    def get_heartbeat_url(self):
+    def _get_heartbeat_url(self):
         return urljoin(self._platformUrl, AiServer.HEARTBEAT_API)
 
-    async def heartbeat(self, port: int):
+    def heartbeat(self, port: int):
         self._check_int_param(port)
         params = {
             "port": port
         }
 
         return self._send_request(
-            url=self.get_heartbeat_url(),
+            url=self._get_heartbeat_url(),
             response_handler=AiServer._handle_http_ok_response,
             method="GET",
             params=params,
             timeout=5.0)
 
-    def get_dataset_url(self):
+    def _get_dataset_url(self):
         return urljoin(self._platformUrl, AiServer.DOWNLOAD_DATASET_API)
 
-    def get_create_dataset_path(self, filename: str) -> str:
-        base_path = Path(self._baseDir)
-        dir_path = base_path.joinpath(AiServer.DATASET_BUCKET)
-        os.makedirs(dir_path, exist_ok=True)
-        file_path = dir_path / filename
+    def _get_create_dataset_file(self, dataset_dir: str, filename: str) -> str:
+        dataset_dir_path = Path(dataset_dir)
+        file_path = dataset_dir_path / filename
         return file_path.as_posix()
 
     @staticmethod
@@ -194,13 +185,14 @@ class AiServer:
         if not dataset_id:
             raise ValueError("dataset_id is none")
 
-        task_id = payload.get("taskId")
-        if not task_id:
-            raise ValueError("task_id is none")
-        return f"{dataset_id}_{task_id}.json"
+        label_id = payload.get("labelId")
+        if not label_id:
+            raise ValueError("label_id is none")
+        return f"{dataset_id}_{label_id}.json"
 
-    def _handle_dataset_download_response(self, response: Union[httpx.Response, None],
-                                          payload: Union[dict, None]) -> str | bool:
+    def _handle_dataset_download_response(self, response: Optional[httpx.Response],
+                                          payload: Optional[dict],
+                                          extra: Optional[dict]) -> str | bool:
         if response is None:
             logger.error("response is None")
             return False
@@ -209,7 +201,7 @@ class AiServer:
         # file_name = AiServer._get_filename_from_content_disposition(content_disposition)
         # if file_name is None:
         file_name = AiServer._get_default_dataset_filename(payload)
-        save_file = self.get_create_dataset_path(file_name)
+        save_file = self._get_create_dataset_file(extra["dataset_dir"], file_name)
 
         with open(save_file, 'wb') as f:
             for chunk in response.iter_bytes(chunk_size=AiServer.FILE_CHUNK_SIZE):
@@ -217,32 +209,34 @@ class AiServer:
         return save_file
 
     @staticmethod
-    def _handle_dataset_response(response: Union[httpx.Response, None],
-                                 payload: Union[dict, None]) -> str:
+    def _handle_dataset_response(response: Optional[httpx.Response],
+                                 payload: Optional[dict],
+                                 extra: Optional[dict]) -> str:
         if response is None:
             print("response is None")
             raise ValueError("response is none")
 
         return response.json()
 
-    def _download_dataset(self, dataset_id: int, task_id: int):
+    def _download_dataset(self, dataset_id: int, label_id: int, dataset_dir: str):
         AiServer._check_int_param(dataset_id)
-        AiServer._check_int_param(task_id)
+        AiServer._check_int_param(label_id)
 
         params = {
             "datasetId": dataset_id,
-            "taskId": task_id
+            "labelId": label_id
         }
         headers = {"Content-Type": "application/json; charset=UTF-8"}
         return AiServer._send_request(
-            url=self.get_dataset_url(),
+            url=self._get_dataset_url(),
             response_handler=self._handle_dataset_download_response,
             method="GET",
             params=params,
             headers=headers,
+            extra={"dataset_dir": dataset_dir},
             timeout=5.0)
 
-    def register_server(self, port: int, description: str, params: str, max_retries: int = 15):
+    def register_server(self, port: int, description: str, params: str, max_retries: int = 30):
         for i in range(max_retries):
             ret = self._register(port=port, description=description, params=json.dumps(params))
             if ret:
@@ -252,20 +246,14 @@ class AiServer:
                 time.sleep(1)
         return False
 
-    def download_dataset(self, dataset_id: int, task_id: int, max_retries: int = 15):
+    def download_dataset(self, dataset_id: int, label_id: int,
+                         dataset_dir: str,
+                         max_retries: int = 15):
         for i in range(max_retries):
-            ret = self._download_dataset(dataset_id=dataset_id, task_id=task_id)
+            ret = self._download_dataset(dataset_id=dataset_id, label_id=label_id, dataset_dir=dataset_dir)
             if ret:
                 return ret
             else:
                 logger.info("download_dataset retry %d", i)
                 time.sleep(1)
         return False
-
-if __name__ == "__main__":
-    path = Path("/Users/zhangjiang/test")
-    full_dir = path.joinpath(AiServer.DATASET_BUCKET)
-    os.makedirs(full_dir, exist_ok=True)
-    full_path = full_dir / "mytest.json"
-    print(type(full_path.as_posix()))
-    print(full_path.as_posix())
