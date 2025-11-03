@@ -69,9 +69,9 @@ class AiServer:
             )
             response.raise_for_status()
             if method == "GET":
-                return response_handler(response, params)
+                return response_handler(response, params, extra)
             else:
-                return response_handler(response, json_data)
+                return response_handler(response, json_data, extra)
         except httpx.HTTPStatusError as e:
             logger.error("HTTP 错误: %s - %s", e.response.status_code, e.response.text)
             return False
@@ -238,7 +238,7 @@ class AiServer:
 
     def register_server(self, port: int, description: str, params: str, max_retries: int = 30):
         for i in range(max_retries):
-            ret = self._register(port=port, description=description, params=json.dumps(params))
+            ret = self._register(port=port, description=description, params=params)
             if ret:
                 return ret
             else:

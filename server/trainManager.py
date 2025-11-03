@@ -132,6 +132,8 @@ class TrainManager:
                             base_dir=self._base_dir
                         )
 
+                        process.status = process_data['status']
+                        process.pid = process_data['pid']
                         if process.status == TaskStatus.RUNNING.name and process.pid:
                             if ProcessUtils.is_process_alive(process.pid):
                                 logger.warning("reconnected to running process: %s for task: %s", process.pid, task_id)
@@ -140,10 +142,12 @@ class TrainManager:
 
                         if process.status not in [TaskStatus.PENDING.name, TaskStatus.RUNNING.name]:
                             continue
-                        process.status = process_data['status']
                         process.start_time = process_data['start_time']
                         process.end_time = process_data['end_time']
-                        process.pid = process_data['pid']
+                        self._processes[process.task_id] = process
+
+                    if len(state.items()) != len(self._processes):
+                        self._save_state()
                 logger.warning("loaded %s training tasks from state file", len(self._processes))
             except Exception as e:
                 logger.error("failed to load state from %s", self._state_file, exc_info=True)
@@ -207,15 +211,17 @@ class TrainManager:
                 logger.warning("can not find training process")
                 return False
 
+            stop_task_id = None
             for task_id, process in self._processes.items():
                 if process.status == TaskStatus.RUNNING.name:
-                    ret = self._stop_training(task_id=task_id, stop_request=stop_request)
-                    logger.warning("stop training task: %s", task_id)
-                    return ret
-        return True
+                    stop_task_id = task_id
+                    break
 
-    @staticmethod
-    def _monitor(process: TrainingProcess):
+        ret = self._stop_training(task_id=stop_task_id, stop_request=stop_request)
+        logger.warning("stop training task: %s", task_id)
+        return ret
+
+    def _monitor(self, process: TrainingProcess):
         try:
             with (open(process.log_file, "a", encoding='utf-8') as log_out,
                   open(process.error_file, "a", encoding='utf-8') as log_err):
@@ -256,10 +262,12 @@ class TrainManager:
         except Exception as e:
             logger.error("error monitor for task: %s", process.start_request.taskId, exc_info=True)
         finally:
-            process.status = TaskStatus.COMPLETED.name if process.process.returncode == 0 else TaskStatus.FAILED.name
-            process.end_time = time.time()
-            logger.warning("training task: %s finished with status: %s",
-                           process.start_request.taskId, process.status)
+            with self._lock:
+                if process.status != TaskStatus.STOPPED.name:
+                    process.status = TaskStatus.COMPLETED.name if process.process.returncode == 0 else TaskStatus.FAILED.name
+                process.end_time = time.time()
+            logger.warning("training task: %s finished with status: %s",process.start_request.taskId, process.status)
+            self._save_state()
 
     def _get_train_config_file(self, task_id: str) -> str:
         return (Path(self._base_dir) / TrainManager.TRAIN_BUCKET / task_id /
@@ -301,6 +309,8 @@ class TrainManager:
             '--run_name', start_request.runName,
             '--tags', repr(start_request.tags)
         ]
+        logger.warning("cmd: %s", cmd)
+        logger.warning("cwd: %s", self._train_module_path)
         logger.warning("start subprocess: %s begin", task_id)
         try:
             if sys.platform == "win32":
@@ -335,12 +345,10 @@ class TrainManager:
             training_process.pid = process.pid
             training_process.status = TaskStatus.RUNNING.name
             training_process.start_time = time.time()
-
-            thread_pool = thread_pool
-            thread_pool.submit(TrainManager._monitor, process=training_process)
-
             with self._lock:
                 self._processes[task_id] = training_process
+
+            thread_pool.submit(self._monitor, process=training_process)
 
             self._save_state()
         except Exception as e:
@@ -348,35 +356,41 @@ class TrainManager:
             raise SystemExit
 
     def _stop_training(self, task_id: str, stop_request: StopRequest) -> bool:
-        if task_id not in self._processes:
-            logger.warning(f"Task {task_id} not found")
-            return False
-
-        process = self._processes[task_id]
-        if process.status != TaskStatus.RUNNING.name:
-            logger.warning(f"Task {task_id} is not running (current status: {process.status})")
-            return False
+        pid = None
+        with self._lock:
+            if task_id not in self._processes:
+                logger.warning("task: %s not found", task_id)
+                return False
+            process = self._processes[task_id]
+            if not process.pid:
+                logger.warning("task: %s pid not exist", task_id)
+            if process.status != TaskStatus.RUNNING.name:
+                logger.warning("task: %s is not running (current status: %s)", task_id, process.status)
+                return False
+            pid = process.pid
 
         try:
             if stop_request.stopType == 0:
-                logger.warning("Sent SIGTERM to subprocess: %s begin", process.pid)
-                os.kill(process.pid, signal.SIGTERM)
-                logger.warning("Sent SIGTERM to subprocess: %s end", process.pid)
-                ProcessUtils.wait_for_process(process.pid)
+                logger.warning("Sent SIGTERM to subprocess: %s begin", pid)
+                os.kill(pid, signal.SIGTERM)
+                logger.warning("Sent SIGTERM to subprocess: %s end", pid)
+                # ProcessUtils.wait_for_process(process.pid)
             else:
-                logger.warning("Sent SIGINT to subprocess: %s begin", process.pid)
-                os.kill(process.pid, signal.SIGINT)
-                logger.warning("Sent SIGINT to subprocess: %s end", process.pid)
-                ProcessUtils.wait_for_process(process.pid)
-
-            process.status = TaskStatus.STOPPED.name
-            process.end_time = time.time()
-
-            self._save_state()
-            return True
+                logger.warning("Sent SIGINT to subprocess: %s begin", pid)
+                os.kill(pid, signal.SIGINT)
+                logger.warning("Sent SIGINT to subprocess: %s end", pid)
+                # ProcessUtils.wait_for_process(process.pid)
         except Exception as e:
             logger.error("failed to stop training task: %s", task_id, exc_info=True)
             return False
+
+        with self._lock:
+            process = self._processes[task_id]
+            if process:
+                process.status = TaskStatus.STOPPED.name
+            # process.end_time = time.time()
+        # self._save_state()
+        return True
 
     @staticmethod
     def test_start_train(config_file: str,
